@@ -7,7 +7,7 @@
         <header>
             <h1 class="entry-title"><?php the_title();?></h1>
             <p class="meta">
-                <time datetime="<?php echo date('c', get_the_time('G')); ?>" pubdate data-updated="true"><?php the_time('F jS, Y') ?></time>
+                <time datetime="<?php echo esc_attr( get_the_time( 'c' ) ); ?>" pubdate data-updated="true"><?php the_time('F jS, Y') ?></time>
                 | <?php comments_popup_link('No Comments', '1 Comment', '% Comments'); ?>
             </p>
         </header>
@@ -19,7 +19,7 @@
         <footer>
             <p class="meta">
                 <span class="byline author vcard">Posted by <span class="fn"><?php the_author();?></span></span>
-                <time datetime="<?php echo date('c', get_the_time('G')); ?>" pubdate data-updated="true"><?php the_time('F jS, Y') ?></time>
+                <time datetime="<?php echo esc_attr( get_the_time( 'c' ) ); ?>" pubdate data-updated="true"><?php the_time('F jS, Y') ?></time>
                     <span class="categories">
                         <?php the_category(', '); ?>
                     </span>
