@@ -50,6 +50,15 @@ git clone git@github.com:wuwx/wordpress-theme-octopress.git octopress
 | Modernizr | 2.0.4 | 特性检测，含 video、respond、mq |
 | highlight.js | 6.1 | 代码高亮，`header.php` 中通过 CDN 引入 |
 
+## 持续集成
+
+`.github/workflows/compat.yml` 在 push、PR 和每周一定时运行：
+
+- `lint`：对所有 PHP 文件执行 `php -l`
+- `smoke`：用 wp-cli 起一个真实的 WordPress（MySQL 8 + PHP 8.2），装入并激活主题，造文章、分页文章、独立页面、分类、带密码文章、评论等测试数据，然后用内置服务器请求首页、首页第二页、单篇及多页文章的后续页、独立页面、分类归档、搜索、404、登录页，断言状态码正确且页面里没有 PHP 致命错误、警告或 Notice
+
+`smoke` 覆盖最新 WordPress 与上一条版本线。定时任务的意义在于 WordPress 发新版时能第一时间发现主题被上游改挂，而不是等有人访问站点才发现。
+
 ## 来源
 
 版式风格来自 Brandon Mathis 的 Octopress（MIT）；评论模板与评论回调改写自 WordPress 默认主题 Twenty Eleven（GPL）；`javascripts/octopress.js` 取自 Octopress 的前端脚本，Ender 与 Modernizr 按原许可打包。本仓库做的是把这些拼成一个可直接安装的 WordPress 主题。

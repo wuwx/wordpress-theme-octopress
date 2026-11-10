@@ -1,0 +1,235 @@
+name: Compatibility
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PHP_VERSION: '8.2'
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          coverage: none
+
+      - name: php -l
+        run: |
+          fail=0
+          while IFS= read -r -d '' file; do
+            if ! out=$(php -l "$file" 2>&1); then
+              echo "$out"
+              fail=1
+            fi
+          done < <(find . -name '*.php' -not -path './.git/*' -print0)
+          [ "$fail" -eq 0 ] || exit 1
+          echo "PHP 语法检查通过"
+
+  smoke:
+    runs-on: ubuntu-latest
+    needs: lint
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        wp: [latest, previous-major]
+
+    services:
+      db:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: wordpress
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+
+    env:
+      WP_PATH: ${{ github.workspace }}/site
+      BASE_URL: http://127.0.0.1:8080
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: mysqli, mbstring, curl, zip, gd, exif
+          coverage: none
+
+      - name: 安装 wp-cli
+        run: |
+          curl -fsSL -o /tmp/wp https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          chmod +x /tmp/wp
+          sudo mv /tmp/wp /usr/local/bin/wp
+          wp --version
+
+      - name: 解析 WordPress 版本
+        id: ver
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          want='${{ matrix.wp }}'
+          if [ "$want" = "latest" ]; then
+            echo "version=latest" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tags=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/WordPress/WordPress/tags?per_page=100" \
+            | jq -r '.[].name' | grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?$' | sort -V -u)
+          prefix=$(echo "$tags" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/' | sort -V -u | tail -2 | head -1)
+          version=$(echo "$tags" | grep -E "^${prefix}(\.[0-9]+)?$" | sort -V | tail -1)
+          if [ -z "$version" ]; then
+            echo "::warning::解析上一版本线失败，回退到 latest"
+            version=latest
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "WordPress 版本：$version"
+
+      - name: 安装 WordPress 并激活主题
+        run: |
+          set -euo pipefail
+          mkdir -p "$WP_PATH"
+          wp core download --version='${{ steps.ver.outputs.version }}' --path="$WP_PATH" --skip-content
+          mkdir -p "$WP_PATH/wp-content/themes/octopress"
+          rsync -a --exclude='.git' --exclude='site' ./ "$WP_PATH/wp-content/themes/octopress/"
+          printf "define('WP_DEBUG', true);\ndefine('WP_DEBUG_DISPLAY', true);\ndefine('WP_DEBUG_LOG', false);\n" \
+            | wp config create --path="$WP_PATH" --dbname=wordpress --dbuser=root --dbpass=root \
+                --dbhost=127.0.0.1 --skip-check --extra-php
+          wp core install --path="$WP_PATH" --url="$BASE_URL" --title='Octopress CI' \
+            --admin_user=admin --admin_password='ci-password' --admin_email='ci@example.com' --skip-email
+          wp theme activate octopress --path="$WP_PATH"
+          wp rewrite structure '/%postname%/' --path="$WP_PATH"
+
+      - name: 造测试内容
+        id: fixture
+        run: |
+          set -euo pipefail
+          W="wp --path=$WP_PATH"
+          $W option update default_comment_status open >/dev/null
+          $W option update page_comments 1 >/dev/null
+          $W option update thread_comments 1 >/dev/null
+          for i in $(seq 1 12); do
+            $W post create --post_status=publish --comment_status=open --porcelain \
+              --post_title="Filler $i" --post_content="<p>Filler body $i</p>" >/dev/null
+          done
+          multi=$($W post create --post_status=publish --comment_status=open --porcelain \
+            --post_title='Hello Octopress' \
+            --post_content='<p>First paragraph.</p><!--nextpage--><p>Second page.</p>')
+          $W post create --post_status=publish \
+            --post_title='Code Sample' --post_content='<pre><code class="php">echo 1;</code></pre>' >/dev/null
+          secret=$($W post create --post_status=publish --post_password=pw --porcelain \
+            --post_title='Secret' --post_content='<p>hidden</p>')
+          $W page create --post_status=publish \
+            --post_title='About' --post_content='<p>About page.</p>' >/dev/null
+          docs=$($W term create category Docs --porcelain)
+          $W post create --post_status=publish --post_category="$docs" \
+            --post_title='In Category' --post_content='<p>categorized</p>' >/dev/null
+          $W comment create --comment_post_ID="$multi" --comment_author='Tester' \
+            --comment_author_email='t@example.com' --comment_content='Nice post' --comment_approved=1 >/dev/null
+          {
+            echo "multi_url=$($W post url "$multi")"
+            echo "secret_url=$($W post url "$secret")"
+            echo "page_url=$($W post url $($W post list --post_type=page --field=ID --posts_per_page=1))"
+            echo "docs_id=$docs"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 启动内置服务器
+        run: |
+          wp server --path="$WP_PATH" --host=127.0.0.1 --port=8080 > /tmp/server.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null "$BASE_URL/"; then
+              echo "站点已就绪"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::站点启动超时"
+          cat /tmp/server.log
+          exit 1
+
+      - name: 冒烟测试
+        env:
+          MULTI_URL: ${{ steps.fixture.outputs.multi_url }}
+          SECRET_URL: ${{ steps.fixture.outputs.secret_url }}
+          PAGE_URL: ${{ steps.fixture.outputs.page_url }}
+          DOCS_ID: ${{ steps.fixture.outputs.docs_id }}
+        run: |
+          set -uo pipefail
+          fail=0
+
+          check() {
+            local name="$1" url="$2" expect="$3"
+            local code body=/tmp/body.html
+            code=$(curl -sSL -m 30 -o "$body" -w '%{http_code}' "$url") || code=000
+            if [ "$code" != "$expect" ]; then
+              echo "::error::$name 期望 $expect，实际 $code ($url)"
+              fail=1
+            fi
+            if grep -qE 'Fatal error|Parse error|There has been a critical error|Uncaught (Error|Exception)' "$body"; then
+              echo "::error::$name 出现致命错误"
+              grep -nE 'Fatal error|Parse error|There has been a critical error|Uncaught' "$body" | head -5
+              fail=1
+            fi
+            if grep -qE 'Warning:|Notice:' "$body"; then
+              echo "::error::$name 出现 PHP 警告"
+              grep -nE 'Warning:|Notice:' "$body" | head -5
+              fail=1
+            fi
+            if grep -qE 'Deprecated:' "$body"; then
+              echo "::warning::$name 出现 Deprecated 提示"
+              grep -nE 'Deprecated:' "$body" | head -5
+            fi
+            echo "$name -> $code"
+          }
+
+          expect_text() {
+            local name="$1" needle="$2"
+            if ! grep -qF "$needle" /tmp/body.html; then
+              echo "::error::$name 未找到「$needle」"
+              fail=1
+            fi
+          }
+
+          check 首页 "$BASE_URL/" 200
+          expect_text 首页 'Hello Octopress'
+          expect_text 首页 '随机文章'
+
+          check 首页分页 "$BASE_URL/page/2/" 200
+          check 单篇 "$MULTI_URL" 200
+          expect_text 单篇 'Tester'
+          expect_text 单篇 'commentform'
+          check 单篇第二页 "${MULTI_URL}2/" 200
+          expect_text 单篇第二页 'Second page.'
+          check 独立页面 "$PAGE_URL" 200
+          expect_text 独立页面 'About page.'
+          check 分类归档 "$BASE_URL/?cat=$DOCS_ID" 200
+          expect_text 分类归档 'In Category'
+          check 搜索 "$BASE_URL/?s=Hello" 200
+          check 密码文章 "$SECRET_URL" 200
+          expect_text 密码文章 'post-password-form'
+          check 404 "$BASE_URL/?p=999999" 404
+          check 登录页 "$BASE_URL/wp-login.php" 200
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "冒烟测试全部通过"
