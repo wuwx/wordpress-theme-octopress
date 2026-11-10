@@ -103,12 +103,14 @@ function content_to_meta(){
 }
 */
 
-if( function_exists('register_sidebar') ) {
-	register_sidebar(array(
+add_action( 'widgets_init', function () {
+	register_sidebar( array(
+		'id'            => 'sidebar-1',
+		'name'          => 'Sidebar',
 		'before_widget' => '<section>',
-		'after_widget' => '</section>',
-		'before_title' => '<h1>',
-		'after_title' => '</h1>'
-	));
-}
+		'after_widget'  => '</section>',
+		'before_title'  => '<h1>',
+		'after_title'   => '</h1>'
+	) );
+} );
 ?>
